@@ -8,67 +8,148 @@ library(wesanderson)
 library(shinycssloaders)
 library(hrbrthemes)
 
+myGridTemplate <- grid_template(
+  default = list(
+    areas = rbind(
+      c(
+        "title",
+        "map"
+      ),
+      c(
+        "user",
+        "map"
+      ),
+      c(
+        "user",
+        "map"
+      )
+    ),
+    cols_width = c(
+      "500px",
+      "1fr"
+    ),
+    rows_height = c(
+      "100px",
+      "auto",
+      "300px"
+    )
+  ),
+  mobile = list(
+    areas = rbind(
+      "title",
+      "map",
+      "user"
+    ),
+    rows_height = c(
+      "100px",
+      "300px",
+      "auto"
+    ),
+    cols_width = c("100%")
+  )
+)
+
 ihme_data_population.R <- read_rds("ihme_data_population.rds")
 
 # Set highcharter options
-options(highcharter.theme = hc_theme_economist(tooltip = list(valueDecimals = 1)))
+options(highcharter.theme = hc_theme_economist(tooltip = list(valueDecimals = 3)))
 
-sexes <- as.matrix(sort(unique(as.factor(ihme_data_population.R$sex_label))))
+sexes <- as.matrix(sort(unique(as.factor(ihme_data_population.R$sex_label)), decreasing = TRUE))
 ages <- as.matrix(sort(unique(as.factor(ihme_data_population.R$age_group_name))))
 years <- as.list(sort(unique(ihme_data_population.R$year_id), decreasing = TRUE))
 health_conditions <- as.list(sort(unique(ihme_data_population.R$cause_name)))
 
-ui <- shinyUI(
-  shiny.semantic::semanticPage(
-    title = "Serious Health Related Suffering (SHS)",
-    h1("Serious Health Related Suffering (SHS)"),
-    sidebar_layout(
-      shiny.semantic::sidebar_panel(
-        p("Select variables:"),
-        dropdown_input(
-          input_id = "shs_sex_label",
-          choices = sexes,
-          default_text = "Sex",
-          value = NULL,
-          type = "selection fluid"
-        ),
-        dropdown_input(
-          input_id = "shs_age_group_name",
-          choices = ages,
-          default_text = "Age group",
-          value = NULL,
-          type = "selection fluid"
-        ),
-        dropdown_input(
-          input_id = "shs_year_id",
-          choices = years,
-          default_text = "Year",
-          value = NULL,
-          type = "selection fluid"
-        ),
-        dropdown_input(
-          input_id = "shs_health_condition_name",
-          choices = health_conditions,
-          default_text = "Health condition",
-          value = NULL,
-          type = "selection fluid"
-        ),
-        textOutput("selected_sex"),
-        textOutput("selected_age_group"),
-        textOutput("selected_year"),
-        textOutput("selected_health_condition")
+ui <- semanticPage(
+  suppress_bootstrap = TRUE,
+  margin = "20px",
+  grid(
+    myGridTemplate,
+    area_styles = list(
+      title = "margin: 10px",
+      user = "margin: 10px",
+      info = "margin: 10px",
+      map = "margin: 10px"
+    ),
+    title = header(
+      title = "Serious Health Related Suffering",
+      description = "SHS",
+      icon = "procedures"
+    ),
+    map = highchartOutput(
+      "map",
+      height = "95%"
+    ),
+    user = div(
+      tags$h3(
+        class = "ui horizontal divider header",
+        icon("ui cog icon"),
+        "Settings"
       ),
-      shiny.semantic::main_panel(
-        # Output: interactive world map
-        shinycssloaders::withSpinner(
-          highchartOutput("map",
-            height = "1000px"
-          ),
-          type = 8,
-          color = wes_palette("Zissou1")[1],
-          color.background = wes_palette("Zissou1")[3]
+      tags$h4(
+        class = "ui header",
+        icon("filter"),
+        "Filter variables"
+      ),
+      dropdown_input(
+        input_id = "shs_sex_label",
+        choices = sexes,
+        default_text = "Sex",
+        value = NULL,
+        type = "selection fluid"
+      ),
+      dropdown_input(
+        input_id = "shs_age_group_name",
+        choices = ages,
+        default_text = "Age group",
+        value = NULL,
+        type = "selection fluid"
+      ),
+      dropdown_input(
+        input_id = "shs_year_id",
+        choices = years,
+        default_text = "Year",
+        value = NULL,
+        type = "selection fluid"
+      ),
+      dropdown_input(
+        input_id = "shs_health_condition_name",
+        choices = health_conditions,
+        default_text = "Health condition",
+        value = NULL,
+        type = "selection fluid"
+      ),
+      div(class = "ui divider"),
+      tags$h4(
+        class = "ui header",
+        icon("ruler horizontal icon"),
+        div(
+          class = "content",
+          "Select scale"
         )
-      )
+      ),
+      form(
+        class = "ui form",
+        field(
+          class = "inline fields",
+          multiple_radio(
+            input_id = "radio_scale",
+            label = "Type",
+            choices = c(
+              "Linear",
+              "Logarithmic"
+            ),
+            choices_value = c(
+              "linear",
+              "logarithmic"
+            ),
+            selected = "linear",
+            position = "inline",
+            type = "radio",
+            icon = "ruler horizontal icon"
+          )
+        )
+      ),
+      div(class = "ui divider")
     )
   )
 )
@@ -112,6 +193,10 @@ server <- function(input, output, session) {
       data$mapclick <- input$mapclick
     })
 
+    observeEvent(input$radio_scale, {
+      data$radio_scale <- input$radio_scale
+    })
+
 
 
     map <- hcmap(
@@ -120,12 +205,14 @@ server <- function(input, output, session) {
       value = "rate",
       joinBy = c("name", "location_name"),
       name = "SHS",
-      download_map_data = F
+      download_map_data = FALSE
     ) %>%
       hc_colorAxis(
-        min = 50,
-        max = 500,
-        stops = color_stops(n = 10, colors = wes_palette("Zissou1"))
+        stops = color_stops(
+          colors = wes_palette("Zissou1")
+        ),
+        type = input$radio_scale,
+        addTitle = "Prevalence"
       ) %>%
       hc_title(
         text = "SHS",
@@ -149,6 +236,7 @@ server <- function(input, output, session) {
       ) %>%
       hc_plotOptions(series = list(events = list(click = click_js)))
   })
+
 
   # Chart
   reactive({
