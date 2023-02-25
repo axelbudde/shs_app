@@ -82,7 +82,7 @@ ui <- semanticPage(
     user = div(
       tags$h3(
         class = "ui horizontal divider header",
-        icon("ui cog icon"),
+        icon("cog icon"),
         "Settings"
       ),
       tags$h4(
@@ -124,7 +124,7 @@ ui <- semanticPage(
         icon("ruler horizontal icon"),
         div(
           class = "content",
-          "Select scale"
+          "Select scale type"
         )
       ),
       form(
@@ -133,7 +133,7 @@ ui <- semanticPage(
           class = "inline fields",
           multiple_radio(
             input_id = "radio_scale",
-            label = "Type",
+            label = "",
             choices = c(
               "Linear",
               "Logarithmic"
