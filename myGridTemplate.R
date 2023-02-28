@@ -12,7 +12,7 @@ myGridTemplate <- grid_template(
         "map"
       ),
       c(
-        "user",
+        "info",
         "map"
       )
     ),
@@ -30,11 +30,13 @@ myGridTemplate <- grid_template(
     areas = rbind(
       "title",
       "map",
-      "user"
+      "user",
+      "info"
     ),
     rows_height = c(
       "100px",
       "300px",
+      "auto",
       "auto"
     ),
     cols_width = c("100%")
