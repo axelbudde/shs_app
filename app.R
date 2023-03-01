@@ -234,7 +234,7 @@ server <- function(input, output, session) {
     world <- jsonlite::fromJSON(world, simplifyVector = FALSE)
 
     map <- hcmap(
-      map = world/custom.js,
+      map = "world/custom.js",
       data = shs,
       value = "rate",
       joinBy = c("name", "location_name"),
