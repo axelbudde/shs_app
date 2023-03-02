@@ -161,9 +161,10 @@ ui <- semanticPage(
       tags$h3(
         class = "ui horizontal divider header",
         icon("bar chart"),
-        "Historical chart"
+        "Historical country chart"
       ),
       # Clicked country
+      flag(print("country")),
       h4(textOutput("country")),
       highchartOutput("chart")
     )
@@ -181,7 +182,7 @@ server <- function(input, output, session) {
 
   # Map
   click_js <- JS("function(event) {Shiny.onInputChange('mapclick',event.point.name);}")
- 
+
 
 
 
@@ -197,35 +198,15 @@ server <- function(input, output, session) {
         location_name,
         rate
       )
-    
 
-  
-    
+
+
+
 
 
     data <- reactiveValues(
-      mapclick = NULL,
-      shs_sex_label = NULL,
-      shs_age_group_name = NULL,
-      shs_year_id = NULL,
-      shs_health_condition_name = NULL
+      mapclick = NULL
     )
-
-    observeEvent(input$shs_sex_label, {
-      data$shs_sex_label <- input$shs_sex_label
-    })
-    
-    observeEvent(input$shs_age_group_name, {
-      data$shs_age_group_name <- input$shs_age_group_name
-    })
-    
-    observeEvent(input$shs_year_id, {
-      data$shs_year_id <- input$shs_year_id
-    })
-    
-    observeEvent(input$shs_health_condition_name, {
-      data$shs_health_condition_name <- input$shs_health_condition_name
-    })
 
     observeEvent(input$mapclick, {
       data$mapclick <- input$mapclick
@@ -237,7 +218,7 @@ server <- function(input, output, session) {
       library(httr)
       content(GET(url))
     }
-    
+
     world <- getContent("https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json")
     # is text
     world <- jsonlite::fromJSON(world, simplifyVector = FALSE)
@@ -284,39 +265,41 @@ server <- function(input, output, session) {
 
   # Chart
 
-    output$chart <- renderHighchart({
-
-     chart <- hchart(
-        ihme_data_population.R %>%
-          filter(
-            
-            sex_label == reactive({input$shs_sex_label}) &
-              age_group_name == reactive({input$shs_age_group_name}) &
-              cause_name == reactive({input$shs_health_condition_name}) &
-              measure_name == "Prevalence" &
-              location_name == reactive({input$mapclick}) 
-          ),
-        "column",
-        hcaes(
-          x = c(
-            "1990",
-            "2000",
-            "2010",
-            "2019"),
-          y = rate
-        )) %>%
-        hc_title(text = reactive({input$shs_health_condition_name})) %>%
-        hc_subtitle(text = paste("Age group ", reactive({input$shs_age_group_name}))) %>%
-        hc_xAxis(title = "Year") %>%
-        hc_yAxis(title = list(text = "Prevalence")) %>%
-        hc_add_theme(hc_theme_economist())
-      
-chart
-})
+  output$chart <- renderHighchart({
+    hchart(
+      ihme_data_population.R %>%
+        filter(
+          sex_label == input$shs_sex_label &
+            age_group_name == input$shs_age_group_name &
+            cause_name == input$shs_health_condition_name &
+            measure_name == "Prevalence" &
+            location_name == input$mapclick
+        ),
+      "column",
+      hcaes(
+        x = c(
+          "1990",
+          "2000",
+          "2010",
+          "2019"
+        ),
+        y = rate,
+        group = location_name
+      )
+    ) %>%
+      hc_title(text = input$shs_health_condition_name) %>%
+      hc_subtitle(text = paste("Age group ", input$shs_age_group_name)) %>%
+      hc_xAxis(title = list(text = "Year")) %>%
+      hc_yAxis(title = list(text = "Prevalence")) %>%
+      hc_add_theme(hc_theme_economist()) %>%
+      hc_tooltip(
+        valueDecimals = 3
+      )
+  })
 
   # Clicked country
   output$country <- renderText({
-    print(input$mapclick)
+    input$mapclick
   })
 }
 
