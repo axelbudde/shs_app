@@ -165,7 +165,6 @@ ui <- semanticPage(
       ),
       # Clicked country
       h4(textOutput("country")),
-      flag("FR"),
       highchartOutput("chart")
     )
   )
@@ -180,20 +179,9 @@ server <- function(input, output, session) {
 
 
 
-
-  # Load the world Map data
-  worldgeojson <- download_map_data("https://code.highcharts.com/mapdata/custom/world.js") %>%
-    get_data_from_map()
-  
-  worldgeojson <- worldgeojson %>%
-    mutate(
-      name = case_match(
-        name,
-        "Czech Republic" ~ "Czechia"
-      ))
-
   # Map
   click_js <- JS("function(event) {Shiny.onInputChange('mapclick',event.point.name);}")
+ 
 
 
 
@@ -211,18 +199,39 @@ server <- function(input, output, session) {
       )
     
 
+  
+    
+
 
     data <- reactiveValues(
-      mapclick = NULL
+      mapclick = NULL,
+      shs_sex_label = NULL,
+      shs_age_group_name = NULL,
+      shs_year_id = NULL,
+      shs_health_condition_name = NULL
     )
+
+    observeEvent(input$shs_sex_label, {
+      data$shs_sex_label <- input$shs_sex_label
+    })
+    
+    observeEvent(input$shs_age_group_name, {
+      data$shs_age_group_name <- input$shs_age_group_name
+    })
+    
+    observeEvent(input$shs_year_id, {
+      data$shs_year_id <- input$shs_year_id
+    })
+    
+    observeEvent(input$shs_health_condition_name, {
+      data$shs_health_condition_name <- input$shs_health_condition_name
+    })
 
     observeEvent(input$mapclick, {
       data$mapclick <- input$mapclick
     })
 
-    observeEvent(input$radio_scale, {
-      data$radio_scale <- input$radio_scale
-    })
+
 
     getContent <- function(url) {
       library(httr)
@@ -234,7 +243,7 @@ server <- function(input, output, session) {
     world <- jsonlite::fromJSON(world, simplifyVector = FALSE)
 
     map <- hcmap(
-      map = "world/custom.js",
+      map = "custom/world",
       data = shs,
       value = "rate",
       joinBy = c("name", "location_name"),
@@ -276,14 +285,16 @@ server <- function(input, output, session) {
   # Chart
 
     output$chart <- renderHighchart({
-      hchart(
+
+     chart <- hchart(
         ihme_data_population.R %>%
           filter(
-            sex_label == input$shs_sex_label &
-              age_group_name == input$shs_age_group_name &
-              cause_name == input$shs_health_condition_name &
+            
+            sex_label == reactive({input$shs_sex_label}) &
+              age_group_name == reactive({input$shs_age_group_name}) &
+              cause_name == reactive({input$shs_health_condition_name}) &
               measure_name == "Prevalence" &
-              location_name == input$mapclick
+              location_name == reactive({input$mapclick}) 
           ),
         "column",
         hcaes(
@@ -293,15 +304,15 @@ server <- function(input, output, session) {
             "2010",
             "2019"),
           y = rate
-        )
-      ) %>%
-        hc_title(text = input$shs_health_condition_name) %>%
-        hc_subtitle(text = paste("Age group ", input$shs_age_group_name)) %>%
+        )) %>%
+        hc_title(text = reactive({input$shs_health_condition_name})) %>%
+        hc_subtitle(text = paste("Age group ", reactive({input$shs_age_group_name}))) %>%
         hc_xAxis(title = "Year") %>%
         hc_yAxis(title = list(text = "Prevalence")) %>%
         hc_add_theme(hc_theme_economist())
-    })
-
+      
+chart
+})
 
   # Clicked country
   output$country <- renderText({
