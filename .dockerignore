@@ -1,0 +1,51 @@
+# Ignore original large data files
+ihme_data_population.rds
+ihme_data_optimized.rds
+
+# Keep ihme_data_factored.rds (optimized version, ~165MB)
+
+# Git files
+.git
+.gitignore
+
+# R project files
+.Rproj.user
+*.Rproj
+.RData
+.Rhistory
+.RDataTmp*
+
+# Old/experimental files
+app_2023_*.R
+app_experimental.R
+app_optimized.R
+*.R.bak
+RICH.R
+non_semantic.R
+shift.R
+Untitled.R
+misc.R
+more\ misc.R
+even\ more\ misc.R
+grid_app.R
+app.R
+
+# Subdirectories (not needed for deployment)
+ip_app/
+shs_formula/
+test_app/
+sunburst/
+Test/
+table_app/
+what/
+routes/
+www/
+
+# Keep shs_modules/ but exclude large files within it
+shs_modules/.RData*
+shs_modules/ihme_data_population.rds
+shs_modules/mfd_app.R
+shs_modules/app.R
+shs_modules/test_app.R
+shs_modules/example_app.R
+shs_modules/start_up.R

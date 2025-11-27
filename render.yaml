@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: shs-app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: 3838
+    plan: standard  # Needs more RAM for the dataset
+    autoDeploy: true
