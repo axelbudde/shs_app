@@ -32,11 +32,6 @@ RUN R -e "install.packages(c( \
     'duckdb' \
 ), repos='https://cloud.r-project.org/')"
 
-# Install shinyflags and rgeolocate from GitHub
-RUN R -e "install.packages('remotes', repos='https://cloud.r-project.org/')"
-RUN R -e "remotes::install_github('rjake/shinyflags')"
-RUN R -e "remotes::install_github('hrbrmstr/rgeolocate')"
-
 # Create app directory
 RUN mkdir -p /srv/shiny-server/shs_app
 
