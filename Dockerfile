@@ -1,7 +1,8 @@
-FROM rocker/shiny:4.3.3
+FROM rocker/r2u:22.04
 
-# Install system dependencies including fonts for hrbrthemes and wget for downloading data
-RUN apt-get update && apt-get install -y \
+# r2u has pre-built Ubuntu binaries - much faster and more reliable
+# Install system dependencies including fonts for hrbrthemes and wget
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev \
     libssl-dev \
     libxml2-dev \
@@ -13,39 +14,16 @@ RUN apt-get update && apt-get install -y \
     libharfbuzz-dev \
     libfribidi-dev \
     fonts-roboto \
-    fonts-roboto-fontface \
     wget \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -fv
 
-# Install core R packages
-RUN R -e "install.packages(c( \
-    'shiny', \
-    'shiny.semantic', \
-    'highcharter', \
-    'tidyr', \
-    'wesanderson', \
-    'shinycssloaders', \
-    'shinyWidgets', \
-    'shinyjs', \
-    'dplyr', \
-    'readr', \
-    'maps', \
-    'DT' \
-), repos='https://cloud.r-project.org/')"
+# Install all R packages including duckdb (pre-built binaries from r2u)
+RUN install.r shiny shiny.semantic highcharter tidyr wesanderson \
+    shinycssloaders shinyWidgets shinyjs dplyr readr maps DT duckdb
 
-# Install duckdb - requires full build toolchain and proper compilation
-# DuckDB compilation needs sufficient memory and the DBI dependency
-RUN apt-get update && apt-get install -y \
-    cmake \
-    g++ \
-    libstdc++6 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install DBI first (duckdb dependency), then duckdb with type='source' to force compilation
-RUN R -e "install.packages('DBI', repos='https://cloud.r-project.org/')" && \
-    R -e "install.packages('duckdb', repos='https://cloud.r-project.org/', type='source', INSTALL_opts='--no-test-load')" && \
-    R -e "library(duckdb); cat('duckdb loaded successfully\n')"
+# Verify duckdb works
+RUN R -e "library(duckdb); cat('duckdb loaded successfully\n')"
 
 # Install font-related packages and hrbrthemes from GitHub
 RUN R -e "install.packages(c('systemfonts', 'extrafont', 'remotes'), repos='https://cloud.r-project.org/')"
