@@ -1,6 +1,6 @@
 FROM rocker/shiny:4.3.3
 
-# Install system dependencies
+# Install system dependencies including fonts for hrbrthemes
 RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
     libssl-dev \
@@ -12,9 +12,12 @@ RUN apt-get update && apt-get install -y \
     libjpeg-dev \
     libharfbuzz-dev \
     libfribidi-dev \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-roboto \
+    fonts-roboto-fontface \
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-cache -fv
 
-# Install R packages
+# Install R packages (without hrbrthemes first)
 RUN R -e "install.packages(c( \
     'shiny', \
     'shiny.semantic', \
@@ -29,8 +32,12 @@ RUN R -e "install.packages(c( \
     'maps', \
     'DT', \
     'duckdb', \
-    'hrbrthemes' \
+    'systemfonts', \
+    'extrafont' \
 ), repos='https://cloud.r-project.org/')"
+
+# Install hrbrthemes separately and import fonts
+RUN R -e "install.packages('hrbrthemes', repos='https://cloud.r-project.org/'); hrbrthemes::import_roboto_condensed()"
 
 # Create app directory
 RUN mkdir -p /srv/shiny-server/shs_app
