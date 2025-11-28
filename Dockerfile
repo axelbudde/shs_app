@@ -17,7 +17,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -fv
 
-# Install R packages (without hrbrthemes first)
+# Install core R packages
 RUN R -e "install.packages(c( \
     'shiny', \
     'shiny.semantic', \
@@ -30,14 +30,15 @@ RUN R -e "install.packages(c( \
     'dplyr', \
     'readr', \
     'maps', \
-    'DT', \
-    'duckdb', \
-    'systemfonts', \
-    'extrafont' \
+    'DT' \
 ), repos='https://cloud.r-project.org/')"
 
-# Install hrbrthemes from GitHub (not available on CRAN for R 4.3.3)
-RUN R -e "install.packages('remotes', repos='https://cloud.r-project.org/'); remotes::install_github('hrbrmstr/hrbrthemes')"
+# Install duckdb separately (large package)
+RUN R -e "install.packages('duckdb', repos='https://cloud.r-project.org/')"
+
+# Install font-related packages and hrbrthemes from GitHub
+RUN R -e "install.packages(c('systemfonts', 'extrafont', 'remotes'), repos='https://cloud.r-project.org/')"
+RUN R -e "remotes::install_github('hrbrmstr/hrbrthemes')"
 
 # Create app directory
 RUN mkdir -p /srv/shiny-server/shs_app
