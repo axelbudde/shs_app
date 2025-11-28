@@ -2,7 +2,7 @@ services:
   - type: web
     name: shs-app
     runtime: docker
-    dockerfilePath: ./Dockerfile
+    dockerfilePath: Dockerfile
     healthCheckPath: /
     envVars:
       - key: PORT
