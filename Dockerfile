@@ -28,7 +28,8 @@ RUN R -e "install.packages(c( \
     'readr', \
     'maps', \
     'DT', \
-    'duckdb' \
+    'duckdb', \
+    'hrbrthemes' \
 ), repos='https://cloud.r-project.org/')"
 
 # Create app directory
