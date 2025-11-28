@@ -36,8 +36,8 @@ RUN R -e "install.packages(c( \
     'extrafont' \
 ), repos='https://cloud.r-project.org/')"
 
-# Install hrbrthemes separately and import fonts
-RUN R -e "install.packages('hrbrthemes', repos='https://cloud.r-project.org/'); hrbrthemes::import_roboto_condensed()"
+# Install hrbrthemes from GitHub (not available on CRAN for R 4.3.3)
+RUN R -e "install.packages('remotes', repos='https://cloud.r-project.org/'); remotes::install_github('hrbrmstr/hrbrthemes')"
 
 # Create app directory
 RUN mkdir -p /srv/shiny-server/shs_app
