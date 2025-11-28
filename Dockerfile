@@ -34,8 +34,13 @@ RUN R -e "install.packages(c( \
     'DT' \
 ), repos='https://cloud.r-project.org/')"
 
-# Install duckdb separately (large package) with explicit verification
-RUN R -e "install.packages('duckdb', repos='https://cloud.r-project.org/')" && \
+# Install duckdb separately - requires compilation dependencies
+RUN apt-get update && apt-get install -y \
+    cmake \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN R -e "install.packages('duckdb', repos='https://cloud.r-project.org/', verbose=TRUE)" && \
     R -e "if (!require('duckdb')) stop('duckdb installation failed!')"
 
 # Install font-related packages and hrbrthemes from GitHub
