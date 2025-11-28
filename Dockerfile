@@ -26,7 +26,6 @@ RUN R -e "install.packages(c( \
     'shinyjs', \
     'dplyr', \
     'readr', \
-    'hrbrthemes', \
     'maps', \
     'DT', \
     'duckdb' \
