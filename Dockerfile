@@ -28,7 +28,8 @@ RUN R -e "install.packages(c( \
     'readr', \
     'hrbrthemes', \
     'maps', \
-    'DT' \
+    'DT', \
+    'duckdb' \
 ), repos='https://cloud.r-project.org/')"
 
 # Install shinyflags and rgeolocate from GitHub
@@ -41,7 +42,7 @@ RUN mkdir -p /srv/shiny-server/shs_app
 
 # Copy app files (mfd_app_v3.R from shs_modules - with responsive layout and updated title)
 COPY shs_modules/mfd_app_v3.R /srv/shiny-server/shs_app/app.R
-COPY ihme_data_factored.rds /srv/shiny-server/shs_app/
+COPY ihme_data.duckdb /srv/shiny-server/shs_app/
 COPY shs_modules/mapdata.rds /srv/shiny-server/shs_app/
 
 # Set working directory
