@@ -8,5 +8,5 @@ services:
     envVars:
       - key: PORT
         value: 3838
-    plan: standard
+    plan: pro
     autoDeploy: true
