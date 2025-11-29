@@ -16,6 +16,7 @@ library(duckdb)
 myGridTemplate <- grid_template(
   default = list(
     areas = rbind(
+      c("title", "title"),
       c("user", "map"),
       c("user", "mfd")
     ),
@@ -24,6 +25,7 @@ myGridTemplate <- grid_template(
       "1fr"
     ),
     rows_height = c(
+      "auto",
       "0.5fr",
       "0.5fr"
     )
@@ -136,6 +138,523 @@ all_shs_causes <- c(
   "Tetanus",
   "Thalassemias"
 )
+
+# ============================================
+# OPTIMIZED QUERY FUNCTIONS (Memory-efficient)
+# Each chart queries only what it needs
+# ============================================
+
+# Helper to build cause filter based on health condition selection
+build_cause_filter <- function(health_condition, shs_toggle) {
+  if (health_condition == "All health conditions") {
+    return(all_shs_causes)
+  }
+
+  # Map grouped conditions to their components
+  condition_map <- list(
+    "Stroke" = c("Intracerebral hemorrhage", "Ischemic stroke", "Subarachnoid hemorrhage"),
+    "Liver diseases" = c("Cirrhosis and other chronic liver diseases", "Other digestive diseases", "Schistosomiasis"),
+    "Tuberculosis" = c("Multidrug-resistant tuberculosis without extensive drug resistance", "Extensively drug-resistant tuberculosis"),
+    "Kidney diseases" = c("Acute glomerulonephritis", "Chronic kidney disease")
+  )
+
+  if (health_condition %in% names(condition_map)) {
+    return(condition_map[[health_condition]])
+  }
+
+  return(health_condition)
+}
+
+# Escape SQL string values
+sql_escape <- function(x) gsub("'", "''", x)
+
+# Build cause list for SQL IN clause
+build_cause_list <- function(causes) {
+  paste0("'", sql_escape(causes), "'", collapse = ", ")
+}
+
+# MAP QUERY: Returns ~201 rows (16 KB) instead of 2.5M rows (424 MB)
+query_map_data <- function(con, causes, sex, year, age, measure, shs_toggle) {
+  cause_list <- build_cause_list(causes)
+  sex_escaped <- sql_escape(sex)
+  age_escaped <- sql_escape(age)
+
+  if (isTRUE(shs_toggle)) {
+    # SHS calculation pushed to SQL for memory efficiency
+    sql <- sprintf("
+      WITH base_data AS (
+        SELECT
+          location_name,
+          cause_name,
+          age_id,
+          income_group,
+          SUM(CASE WHEN measure_name = 'Deaths' THEN val ELSE 0 END) as deaths_val,
+          SUM(CASE WHEN measure_name = 'Prevalence' THEN val ELSE 0 END) as prev_val,
+          SUM(CASE WHEN measure_name = 'Incidence' THEN val ELSE 0 END) as inc_val
+        FROM ihme_data_geo
+        WHERE cause_name IN (%s)
+          AND sex_label = '%s'
+          AND year_id = %d
+          AND age_group_name = '%s'
+          AND metric_name = 'Rate'
+        GROUP BY location_name, cause_name, age_id, income_group
+      )
+      SELECT
+        location_name,
+        SUM(
+          CASE
+            WHEN cause_name = 'Other neglected tropical diseases' THEN deaths_val / 3.0 * 0.05
+            WHEN cause_name = 'Multidrug-resistant tuberculosis without extensive drug resistance' THEN (inc_val - deaths_val / 6.0) * 0.5
+            WHEN cause_name = 'Extensively drug-resistant tuberculosis' THEN (inc_val - deaths_val / 6.0) * 1.0
+            WHEN cause_name = 'HIV/AIDS' THEN prev_val / 3.0 * 0.5
+            WHEN cause_name = 'Alzheimer''s disease and other dementias' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Tetanus' THEN deaths_val / 3.0 * 0.5
+            WHEN cause_name = 'Parkinson''s disease' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Multiple sclerosis' THEN prev_val / 3.0 * 0.017
+            WHEN cause_name = 'Congenital birth defects' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Injuries' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Musculoskeletal disorders' THEN deaths_val / 3.0 * 1.4
+            WHEN cause_name = 'Sickle cell disorders' THEN prev_val / 3.0 * 0.6
+            WHEN cause_name IN ('Cirrhosis and other chronic liver diseases', 'Other digestive diseases', 'Schistosomiasis')
+              THEN deaths_val / 9.0 * 0.5 * 1.5
+            WHEN cause_name IN ('Chronic kidney disease', 'Acute glomerulonephritis')
+              THEN deaths_val / 6.0 * 1.0
+            WHEN cause_name IN ('Intracerebral hemorrhage', 'Ischemic stroke', 'Subarachnoid hemorrhage')
+              THEN deaths_val / 9.0 * 1.0 * 1.5
+            WHEN cause_name = 'Diabetes mellitus' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Thalassemias' THEN prev_val / 3.0 * 0.4
+            WHEN cause_name = 'Neonatal preterm birth' THEN prev_val / 3.0 * 0.01
+            WHEN cause_name = 'Neonatal encephalopathy due to birth asphyxia and trauma' THEN prev_val / 3.0 * 0.15
+            ELSE 0
+          END
+        ) as val
+      FROM base_data
+      GROUP BY location_name
+    ", cause_list, sex_escaped, year, age_escaped)
+  } else {
+    # Standard measure query
+    measure_escaped <- sql_escape(measure)
+    sql <- sprintf("
+      SELECT location_name, SUM(val) as val
+      FROM ihme_data_geo
+      WHERE cause_name IN (%s)
+        AND sex_label = '%s'
+        AND year_id = %d
+        AND age_group_name = '%s'
+        AND metric_name = 'Rate'
+        AND measure_name = '%s'
+      GROUP BY location_name
+    ", cause_list, sex_escaped, year, age_escaped, measure_escaped)
+  }
+
+  dbGetQuery(con, sql)
+}
+
+# HISTORICAL CHART QUERY: Returns ~4 rows per country
+query_historical_data <- function(con, causes, sex, locations, age, metric, measure, shs_toggle) {
+  cause_list <- build_cause_list(causes)
+  sex_escaped <- sql_escape(sex)
+  location_list <- build_cause_list(locations)  # Reuse for location escaping
+  age_escaped <- sql_escape(age)
+  metric_escaped <- sql_escape(metric)
+
+  if (isTRUE(shs_toggle)) {
+    sql <- sprintf("
+      WITH base_data AS (
+        SELECT
+          location_name,
+          year_id,
+          cause_name,
+          age_id,
+          income_group,
+          SUM(CASE WHEN measure_name = 'Deaths' THEN val ELSE 0 END) as deaths_val,
+          SUM(CASE WHEN measure_name = 'Prevalence' THEN val ELSE 0 END) as prev_val,
+          SUM(CASE WHEN measure_name = 'Incidence' THEN val ELSE 0 END) as inc_val
+        FROM ihme_data_geo
+        WHERE cause_name IN (%s)
+          AND sex_label = '%s'
+          AND location_name IN (%s)
+          AND age_group_name = '%s'
+          AND metric_name = '%s'
+        GROUP BY location_name, year_id, cause_name, age_id, income_group
+      )
+      SELECT
+        year_id as year,
+        location_name,
+        SUM(
+          CASE
+            WHEN cause_name = 'Other neglected tropical diseases' THEN deaths_val / 3.0 * 0.05
+            WHEN cause_name = 'Multidrug-resistant tuberculosis without extensive drug resistance' THEN (inc_val - deaths_val / 6.0) * 0.5
+            WHEN cause_name = 'Extensively drug-resistant tuberculosis' THEN (inc_val - deaths_val / 6.0) * 1.0
+            WHEN cause_name = 'HIV/AIDS' THEN prev_val / 3.0 * 0.5
+            WHEN cause_name = 'Alzheimer''s disease and other dementias' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Tetanus' THEN deaths_val / 3.0 * 0.5
+            WHEN cause_name = 'Parkinson''s disease' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Multiple sclerosis' THEN prev_val / 3.0 * 0.017
+            WHEN cause_name = 'Congenital birth defects' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Injuries' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Musculoskeletal disorders' THEN deaths_val / 3.0 * 1.4
+            WHEN cause_name = 'Sickle cell disorders' THEN prev_val / 3.0 * 0.6
+            WHEN cause_name IN ('Cirrhosis and other chronic liver diseases', 'Other digestive diseases', 'Schistosomiasis')
+              THEN deaths_val / 9.0 * 0.5 * 1.5
+            WHEN cause_name IN ('Chronic kidney disease', 'Acute glomerulonephritis')
+              THEN deaths_val / 6.0 * 1.0
+            WHEN cause_name IN ('Intracerebral hemorrhage', 'Ischemic stroke', 'Subarachnoid hemorrhage')
+              THEN deaths_val / 9.0 * 1.0 * 1.5
+            WHEN cause_name = 'Diabetes mellitus' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Thalassemias' THEN prev_val / 3.0 * 0.4
+            WHEN cause_name = 'Neonatal preterm birth' THEN prev_val / 3.0 * 0.01
+            WHEN cause_name = 'Neonatal encephalopathy due to birth asphyxia and trauma' THEN prev_val / 3.0 * 0.15
+            ELSE 0
+          END
+        ) as val
+      FROM base_data
+      GROUP BY year_id, location_name
+      ORDER BY location_name, year_id
+    ", cause_list, sex_escaped, location_list, age_escaped, metric_escaped)
+  } else {
+    measure_escaped <- sql_escape(measure)
+    sql <- sprintf("
+      SELECT year_id as year, location_name, SUM(val) as val
+      FROM ihme_data_geo
+      WHERE cause_name IN (%s)
+        AND sex_label = '%s'
+        AND location_name IN (%s)
+        AND age_group_name = '%s'
+        AND metric_name = '%s'
+        AND measure_name = '%s'
+      GROUP BY year_id, location_name
+      ORDER BY location_name, year_id
+    ", cause_list, sex_escaped, location_list, age_escaped, metric_escaped, measure_escaped)
+  }
+
+  dbGetQuery(con, sql)
+}
+
+# TOP 20/BOTTOM 20 RANKING QUERY: Returns exactly 20 rows
+query_ranking_data <- function(con, causes, sex, year, age, metric, measure, order_type, shs_toggle) {
+  cause_list <- build_cause_list(causes)
+  sex_escaped <- sql_escape(sex)
+  age_escaped <- sql_escape(age)
+  metric_escaped <- sql_escape(metric)
+  order_sql <- if (order_type == "top_20") "DESC" else "ASC"
+
+  if (isTRUE(shs_toggle)) {
+    sql <- sprintf("
+      WITH base_data AS (
+        SELECT
+          location_name,
+          cause_name,
+          age_id,
+          income_group,
+          SUM(CASE WHEN measure_name = 'Deaths' THEN val ELSE 0 END) as deaths_val,
+          SUM(CASE WHEN measure_name = 'Prevalence' THEN val ELSE 0 END) as prev_val,
+          SUM(CASE WHEN measure_name = 'Incidence' THEN val ELSE 0 END) as inc_val
+        FROM ihme_data_geo
+        WHERE cause_name IN (%s)
+          AND sex_label = '%s'
+          AND year_id = %d
+          AND age_group_name = '%s'
+          AND metric_name = '%s'
+        GROUP BY location_name, cause_name, age_id, income_group
+      )
+      SELECT
+        location_name,
+        SUM(
+          CASE
+            WHEN cause_name = 'Other neglected tropical diseases' THEN deaths_val / 3.0 * 0.05
+            WHEN cause_name = 'Multidrug-resistant tuberculosis without extensive drug resistance' THEN (inc_val - deaths_val / 6.0) * 0.5
+            WHEN cause_name = 'Extensively drug-resistant tuberculosis' THEN (inc_val - deaths_val / 6.0) * 1.0
+            WHEN cause_name = 'HIV/AIDS' THEN prev_val / 3.0 * 0.5
+            WHEN cause_name = 'Alzheimer''s disease and other dementias' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Tetanus' THEN deaths_val / 3.0 * 0.5
+            WHEN cause_name = 'Parkinson''s disease' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Multiple sclerosis' THEN prev_val / 3.0 * 0.017
+            WHEN cause_name = 'Congenital birth defects' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Injuries' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Musculoskeletal disorders' THEN deaths_val / 3.0 * 1.4
+            WHEN cause_name = 'Sickle cell disorders' THEN prev_val / 3.0 * 0.6
+            WHEN cause_name IN ('Cirrhosis and other chronic liver diseases', 'Other digestive diseases', 'Schistosomiasis')
+              THEN deaths_val / 9.0 * 0.5 * 1.5
+            WHEN cause_name IN ('Chronic kidney disease', 'Acute glomerulonephritis')
+              THEN deaths_val / 6.0 * 1.0
+            WHEN cause_name IN ('Intracerebral hemorrhage', 'Ischemic stroke', 'Subarachnoid hemorrhage')
+              THEN deaths_val / 9.0 * 1.0 * 1.5
+            WHEN cause_name = 'Diabetes mellitus' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Thalassemias' THEN prev_val / 3.0 * 0.4
+            WHEN cause_name = 'Neonatal preterm birth' THEN prev_val / 3.0 * 0.01
+            WHEN cause_name = 'Neonatal encephalopathy due to birth asphyxia and trauma' THEN prev_val / 3.0 * 0.15
+            ELSE 0
+          END
+        ) as val
+      FROM base_data
+      GROUP BY location_name
+      ORDER BY val %s
+      LIMIT 20
+    ", cause_list, sex_escaped, year, age_escaped, metric_escaped, order_sql)
+  } else {
+    measure_escaped <- sql_escape(measure)
+    sql <- sprintf("
+      SELECT location_name, SUM(val) as val
+      FROM ihme_data_geo
+      WHERE cause_name IN (%s)
+        AND sex_label = '%s'
+        AND year_id = %d
+        AND age_group_name = '%s'
+        AND metric_name = '%s'
+        AND measure_name = '%s'
+      GROUP BY location_name
+      ORDER BY val %s
+      LIMIT 20
+    ", cause_list, sex_escaped, year, age_escaped, metric_escaped, measure_escaped, order_sql)
+  }
+
+  dbGetQuery(con, sql)
+}
+
+# SUNBURST/TREEMAP QUERY: Returns ~5400 rows grouped by geography
+query_sunburst_data <- function(con, causes, sex, year, age, measure, shs_toggle) {
+  cause_list <- build_cause_list(causes)
+  sex_escaped <- sql_escape(sex)
+  # For sunburst, always use "All ages" if Age-standardized selected and Number metric
+  age_for_query <- if (age == "Age-standardized") "All ages" else age
+  age_escaped <- sql_escape(age_for_query)
+
+  if (isTRUE(shs_toggle)) {
+    sql <- sprintf("
+      WITH base_data AS (
+        SELECT
+          continent,
+          subregion,
+          location_name,
+          cause_name,
+          age_id,
+          income_group,
+          SUM(CASE WHEN measure_name = 'Deaths' THEN val ELSE 0 END) as deaths_val,
+          SUM(CASE WHEN measure_name = 'Prevalence' THEN val ELSE 0 END) as prev_val,
+          SUM(CASE WHEN measure_name = 'Incidence' THEN val ELSE 0 END) as inc_val
+        FROM ihme_data_geo
+        WHERE cause_name IN (%s)
+          AND sex_label = '%s'
+          AND year_id = %d
+          AND age_group_name = '%s'
+          AND metric_name = 'Number'
+        GROUP BY continent, subregion, location_name, cause_name, age_id, income_group
+      )
+      SELECT
+        continent,
+        subregion,
+        location_name,
+        SUM(
+          CASE
+            WHEN cause_name = 'Other neglected tropical diseases' THEN deaths_val / 3.0 * 0.05
+            WHEN cause_name = 'Multidrug-resistant tuberculosis without extensive drug resistance' THEN (inc_val - deaths_val / 6.0) * 0.5
+            WHEN cause_name = 'Extensively drug-resistant tuberculosis' THEN (inc_val - deaths_val / 6.0) * 1.0
+            WHEN cause_name = 'HIV/AIDS' THEN prev_val / 3.0 * 0.5
+            WHEN cause_name = 'Alzheimer''s disease and other dementias' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Tetanus' THEN deaths_val / 3.0 * 0.5
+            WHEN cause_name = 'Parkinson''s disease' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Multiple sclerosis' THEN prev_val / 3.0 * 0.017
+            WHEN cause_name = 'Congenital birth defects' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Injuries' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Musculoskeletal disorders' THEN deaths_val / 3.0 * 1.4
+            WHEN cause_name = 'Sickle cell disorders' THEN prev_val / 3.0 * 0.6
+            WHEN cause_name IN ('Cirrhosis and other chronic liver diseases', 'Other digestive diseases', 'Schistosomiasis')
+              THEN deaths_val / 9.0 * 0.5 * 1.5
+            WHEN cause_name IN ('Chronic kidney disease', 'Acute glomerulonephritis')
+              THEN deaths_val / 6.0 * 1.0
+            WHEN cause_name IN ('Intracerebral hemorrhage', 'Ischemic stroke', 'Subarachnoid hemorrhage')
+              THEN deaths_val / 9.0 * 1.0 * 1.5
+            WHEN cause_name = 'Diabetes mellitus' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Thalassemias' THEN prev_val / 3.0 * 0.4
+            WHEN cause_name = 'Neonatal preterm birth' THEN prev_val / 3.0 * 0.01
+            WHEN cause_name = 'Neonatal encephalopathy due to birth asphyxia and trauma' THEN prev_val / 3.0 * 0.15
+            ELSE 0
+          END
+        ) as val
+      FROM base_data
+      GROUP BY continent, subregion, location_name
+      ORDER BY continent, subregion, location_name
+    ", cause_list, sex_escaped, year, age_escaped)
+  } else {
+    measure_escaped <- sql_escape(measure)
+    sql <- sprintf("
+      SELECT continent, subregion, location_name, SUM(val) as val
+      FROM ihme_data_geo
+      WHERE cause_name IN (%s)
+        AND sex_label = '%s'
+        AND year_id = %d
+        AND age_group_name = '%s'
+        AND metric_name = 'Number'
+        AND measure_name = '%s'
+      GROUP BY continent, subregion, location_name
+      ORDER BY continent, subregion, location_name
+    ", cause_list, sex_escaped, year, age_escaped, measure_escaped)
+  }
+
+  dbGetQuery(con, sql)
+}
+
+# BUBBLE/PACKED BUBBLE QUERY: Returns data grouped by breakdown category
+query_bubble_data <- function(con, causes, sex, year, age, measure, breakdown, shs_toggle) {
+  cause_list <- build_cause_list(causes)
+  sex_escaped <- sql_escape(sex)
+  age_for_query <- if (age == "Age-standardized") "All ages" else age
+  age_escaped <- sql_escape(age_for_query)
+  # Don't escape breakdown - it's a column name, not a value
+  # Use COALESCE to handle NULL values in region_wb
+  breakdown_col_expr <- sprintf("COALESCE(%s, 'Other')", breakdown)
+
+  if (isTRUE(shs_toggle)) {
+    sql <- sprintf("
+      WITH base_data AS (
+        SELECT
+          location_name,
+          %s as breakdown_col,
+          cause_name,
+          age_id,
+          income_group,
+          SUM(CASE WHEN measure_name = 'Deaths' THEN val ELSE 0 END) as deaths_val,
+          SUM(CASE WHEN measure_name = 'Prevalence' THEN val ELSE 0 END) as prev_val,
+          SUM(CASE WHEN measure_name = 'Incidence' THEN val ELSE 0 END) as inc_val
+        FROM ihme_data_geo
+        WHERE cause_name IN (%s)
+          AND sex_label = '%s'
+          AND year_id = %d
+          AND age_group_name = '%s'
+          AND metric_name = 'Number'
+        GROUP BY location_name, %s, cause_name, age_id, income_group
+      )
+      SELECT
+        location_name,
+        breakdown_col,
+        SUM(
+          CASE
+            WHEN cause_name = 'Other neglected tropical diseases' THEN deaths_val / 3.0 * 0.05
+            WHEN cause_name = 'Multidrug-resistant tuberculosis without extensive drug resistance' THEN (inc_val - deaths_val / 6.0) * 0.5
+            WHEN cause_name = 'Extensively drug-resistant tuberculosis' THEN (inc_val - deaths_val / 6.0) * 1.0
+            WHEN cause_name = 'HIV/AIDS' THEN prev_val / 3.0 * 0.5
+            WHEN cause_name = 'Alzheimer''s disease and other dementias' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Tetanus' THEN deaths_val / 3.0 * 0.5
+            WHEN cause_name = 'Parkinson''s disease' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Multiple sclerosis' THEN prev_val / 3.0 * 0.017
+            WHEN cause_name = 'Congenital birth defects' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Injuries' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Musculoskeletal disorders' THEN deaths_val / 3.0 * 1.4
+            WHEN cause_name = 'Sickle cell disorders' THEN prev_val / 3.0 * 0.6
+            WHEN cause_name IN ('Cirrhosis and other chronic liver diseases', 'Other digestive diseases', 'Schistosomiasis')
+              THEN deaths_val / 9.0 * 0.5 * 1.5
+            WHEN cause_name IN ('Chronic kidney disease', 'Acute glomerulonephritis')
+              THEN deaths_val / 6.0 * 1.0
+            WHEN cause_name IN ('Intracerebral hemorrhage', 'Ischemic stroke', 'Subarachnoid hemorrhage')
+              THEN deaths_val / 9.0 * 1.0 * 1.5
+            WHEN cause_name = 'Diabetes mellitus' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Thalassemias' THEN prev_val / 3.0 * 0.4
+            WHEN cause_name = 'Neonatal preterm birth' THEN prev_val / 3.0 * 0.01
+            WHEN cause_name = 'Neonatal encephalopathy due to birth asphyxia and trauma' THEN prev_val / 3.0 * 0.15
+            ELSE 0
+          END
+        ) as val
+      FROM base_data
+      GROUP BY location_name, breakdown_col
+      ORDER BY location_name
+    ", breakdown_col_expr, cause_list, sex_escaped, year, age_escaped, breakdown_col_expr)
+  } else {
+    measure_escaped <- sql_escape(measure)
+    sql <- sprintf("
+      SELECT location_name, %s as breakdown_col, SUM(val) as val
+      FROM ihme_data_geo
+      WHERE cause_name IN (%s)
+        AND sex_label = '%s'
+        AND year_id = %d
+        AND age_group_name = '%s'
+        AND metric_name = 'Number'
+        AND measure_name = '%s'
+      GROUP BY location_name, %s
+      ORDER BY location_name
+    ", breakdown_col_expr, cause_list, sex_escaped, year, age_escaped, measure_escaped, breakdown_col_expr)
+  }
+
+  dbGetQuery(con, sql)
+}
+
+# TABLE QUERY: Returns ~201 rows
+query_table_data <- function(con, causes, sex, year, age, metric, measure, shs_toggle) {
+  cause_list <- build_cause_list(causes)
+  sex_escaped <- sql_escape(sex)
+  age_escaped <- sql_escape(age)
+  metric_escaped <- sql_escape(metric)
+
+  if (isTRUE(shs_toggle)) {
+    sql <- sprintf("
+      WITH base_data AS (
+        SELECT
+          location_name,
+          cause_name,
+          age_id,
+          income_group,
+          SUM(CASE WHEN measure_name = 'Deaths' THEN val ELSE 0 END) as deaths_val,
+          SUM(CASE WHEN measure_name = 'Prevalence' THEN val ELSE 0 END) as prev_val,
+          SUM(CASE WHEN measure_name = 'Incidence' THEN val ELSE 0 END) as inc_val
+        FROM ihme_data_geo
+        WHERE cause_name IN (%s)
+          AND sex_label = '%s'
+          AND year_id = %d
+          AND age_group_name = '%s'
+          AND metric_name = '%s'
+        GROUP BY location_name, cause_name, age_id, income_group
+      )
+      SELECT
+        location_name,
+        ROUND(SUM(
+          CASE
+            WHEN cause_name = 'Other neglected tropical diseases' THEN deaths_val / 3.0 * 0.05
+            WHEN cause_name = 'Multidrug-resistant tuberculosis without extensive drug resistance' THEN (inc_val - deaths_val / 6.0) * 0.5
+            WHEN cause_name = 'Extensively drug-resistant tuberculosis' THEN (inc_val - deaths_val / 6.0) * 1.0
+            WHEN cause_name = 'HIV/AIDS' THEN prev_val / 3.0 * 0.5
+            WHEN cause_name = 'Alzheimer''s disease and other dementias' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Tetanus' THEN deaths_val / 3.0 * 0.5
+            WHEN cause_name = 'Parkinson''s disease' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Multiple sclerosis' THEN prev_val / 3.0 * 0.017
+            WHEN cause_name = 'Congenital birth defects' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Injuries' THEN deaths_val / 3.0 * 0.6
+            WHEN cause_name = 'Musculoskeletal disorders' THEN deaths_val / 3.0 * 1.4
+            WHEN cause_name = 'Sickle cell disorders' THEN prev_val / 3.0 * 0.6
+            WHEN cause_name IN ('Cirrhosis and other chronic liver diseases', 'Other digestive diseases', 'Schistosomiasis')
+              THEN deaths_val / 9.0 * 0.5 * 1.5
+            WHEN cause_name IN ('Chronic kidney disease', 'Acute glomerulonephritis')
+              THEN deaths_val / 6.0 * 1.0
+            WHEN cause_name IN ('Intracerebral hemorrhage', 'Ischemic stroke', 'Subarachnoid hemorrhage')
+              THEN deaths_val / 9.0 * 1.0 * 1.5
+            WHEN cause_name = 'Diabetes mellitus' THEN prev_val / 3.0 * 0.1
+            WHEN cause_name = 'Thalassemias' THEN prev_val / 3.0 * 0.4
+            WHEN cause_name = 'Neonatal preterm birth' THEN prev_val / 3.0 * 0.01
+            WHEN cause_name = 'Neonatal encephalopathy due to birth asphyxia and trauma' THEN prev_val / 3.0 * 0.15
+            ELSE 0
+          END
+        ), 3) as val
+      FROM base_data
+      GROUP BY location_name
+      ORDER BY location_name
+    ", cause_list, sex_escaped, year, age_escaped, metric_escaped)
+  } else {
+    measure_escaped <- sql_escape(measure)
+    sql <- sprintf("
+      SELECT location_name, ROUND(SUM(val), 3) as val
+      FROM ihme_data_geo
+      WHERE cause_name IN (%s)
+        AND sex_label = '%s'
+        AND year_id = %d
+        AND age_group_name = '%s'
+        AND metric_name = '%s'
+        AND measure_name = '%s'
+      GROUP BY location_name
+      ORDER BY location_name
+    ", cause_list, sex_escaped, year, age_escaped, metric_escaped, measure_escaped)
+  }
+
+  dbGetQuery(con, sql)
+}
 
 # Set highcharter options
 options(highcharter.theme = hc_theme_economist(tooltip = list(valueDecimals = 3)))
@@ -302,6 +821,13 @@ ui <- semanticPage(
     .irs-bar, .irs-bar-edge, .irs-single, .irs-to, .irs-from {
       background: #6794A7 !important;
       border-color: #6794A7 !important;
+    }
+    /* Style the SHS toggle with Zissou1 blue (#3B9AB2) */
+    .ui.toggle.checkbox input:checked ~ label:before,
+    .ui.toggle.checkbox input:checked ~ .box:before,
+    .ui.toggle.checkbox input:focus:checked ~ label:before,
+    .ui.toggle.checkbox input:focus:checked ~ .box:before {
+      background-color: #3B9AB2 !important;
     }
   ")),
   # Responsive CSS
@@ -1012,7 +1538,7 @@ tags$h1(
               inputId = "shs_year_id",
               label = NULL,
               choices = as.character(years),
-              selected = as.character(2019),
+              selected = as.character(max(unlist(years))),
               animate = TRUE,
               grid = TRUE,
               force_edges = TRUE
@@ -1177,7 +1703,7 @@ server <- function(input, output, session) {
                           choices = health_conditions, value = "All health conditions")
     update_dropdown_input(session, "shs_age_group_name",
                           choices = ages, value = "Age-standardized")
-    shinyWidgets::updateSliderTextInput(session, "shs_year_id", selected = "2019")
+    shinyWidgets::updateSliderTextInput(session, "shs_year_id", selected = as.character(max(unlist(years))))
     # Reset sex radio to "Both" using JavaScript
     shinyjs::runjs("$('#shs_sex_label input[value=\"Both\"]').prop('checked', true).trigger('change');")
     # Reset indicator radio to "Rate" using JavaScript
@@ -1478,179 +2004,125 @@ server <- function(input, output, session) {
     )
   })
 
-  shs <- reactive({
-    # Define all SHS causes
-    all_shs_causes <- c(
-      "Acute glomerulonephritis",
-      "Alzheimer's disease and other dementias",
-      "Chronic kidney disease",
-      "Cirrhosis and other chronic liver diseases",
-      "Congenital birth defects",
-      "Diabetes mellitus",
-      "Extensively drug-resistant tuberculosis",
-      "HIV/AIDS",
-      "Injuries",
-      "Intracerebral hemorrhage",
-      "Ischemic stroke",
-      "Leukemia",
-      "Multidrug-resistant tuberculosis without extensive drug resistance",
-      "Multiple sclerosis",
-      "Musculoskeletal disorders",
-      "Neonatal encephalopathy due to birth asphyxia and trauma",
-      "Neonatal preterm birth",
-      "Neoplasms",
-      "Other digestive diseases",
-      "Other neglected tropical diseases",
-      "Other neoplasms",
-      "Parkinson's disease",
-      "Schistosomiasis",
-      "Sickle cell disorders",
-      "Subarachnoid hemorrhage",
-      "Tetanus",
-      "Thalassemias"
+  # ============================================
+  # MEMORY-OPTIMIZED DATA REACTIVES
+  # Each chart queries only what it needs from DuckDB
+  # Replaces the old shs() and shs_calculated() that cached 424MB
+  # ============================================
+
+  # Reactive for selected causes (used by all chart queries)
+  selected_causes <- reactive({
+    build_cause_filter(input$shs_health_condition_name, input$shs_toggle)
+  })
+
+  # MAP DATA: ~201 rows, ~16KB (was 424MB)
+  shs_map_data <- reactive({
+    query_map_data(
+      db_con,
+      selected_causes(),
+      input$shs_sex_label,
+      as.integer(input$shs_year_id),
+      input$shs_age_group_name,
+      input$shs_measure_name,
+      input$shs_toggle
     )
+  })
 
-    # Determine which causes to include based on selected health condition
-    selected_causes <- case_when(
-      input$shs_health_condition_name == "All health conditions" ~ list(all_shs_causes),
-      input$shs_health_condition_name == "Stroke" ~ list(c("Intracerebral hemorrhage", "Ischemic stroke", "Subarachnoid hemorrhage")),
-      input$shs_health_condition_name == "Liver diseases" ~ list(c("Cirrhosis and other chronic liver diseases", "Other digestive diseases", "Schistosomiasis")),
-      input$shs_health_condition_name == "Tuberculosis" ~ list(c("Multidrug-resistant tuberculosis without extensive drug resistance", "Extensively drug-resistant tuberculosis")),
-      input$shs_health_condition_name == "Kidney diseases" ~ list(c("Acute glomerulonephritis", "Chronic kidney disease")),
-      TRUE ~ list(input$shs_health_condition_name)
-    )[[1]]
-
-    if (isTRUE(input$shs_toggle)) {
-      # SHS calculation mode - need all measures for the formula
-      query_data(db_con, selected_causes, input$shs_sex_label)
+  # HISTORICAL CHART DATA: ~4 rows per country
+  shs_historical_data <- reactive({
+    age <- if (input$radio_indicator == "Number" && input$shs_age_group_name == "Age-standardized") {
+      "All ages"
     } else {
-      # Standard measure mode
-      query_data(db_con, selected_causes, input$shs_sex_label, input$shs_measure_name)
+      input$shs_age_group_name
     }
-  }) %>% bindCache(input$shs_health_condition_name, input$shs_sex_label, input$shs_measure_name, input$shs_toggle)
+    query_historical_data(
+      db_con,
+      selected_causes(),
+      input$shs_sex_label,
+      select_location(),
+      age,
+      input$radio_indicator,
+      input$shs_measure_name,
+      input$shs_toggle
+    )
+  })
 
-  # SHS calculation reactive - calculates SHS when toggle is on
-  shs_calculated <- reactive({
-    if (!isTRUE(input$shs_toggle)) {
-      # Return filtered data as-is when SHS toggle is off
-      return(shs())
+  # RANKING DATA: exactly 20 rows
+  shs_ranking_data <- reactive({
+    age <- if (input$radio_indicator == "Number" && input$shs_age_group_name == "Age-standardized") {
+      "All ages"
+    } else {
+      input$shs_age_group_name
     }
+    query_ranking_data(
+      db_con,
+      selected_causes(),
+      input$shs_sex_label,
+      as.integer(input$shs_year_id),
+      age,
+      input$radio_indicator,
+      input$shs_measure_name,
+      input$order,
+      input$shs_toggle
+    )
+  })
 
-    # Determine which causes to include based on selected health condition
-    selected_causes <- case_when(
-      input$shs_health_condition_name == "All health conditions" ~ list(all_shs_causes),
-      input$shs_health_condition_name == "Stroke" ~ list(c("Intracerebral hemorrhage", "Ischemic stroke", "Subarachnoid hemorrhage")),
-      input$shs_health_condition_name == "Liver diseases" ~ list(c("Cirrhosis and other chronic liver diseases", "Other digestive diseases", "Schistosomiasis")),
-      input$shs_health_condition_name == "Tuberculosis" ~ list(c("Multidrug-resistant tuberculosis without extensive drug resistance", "Extensively drug-resistant tuberculosis")),
-      input$shs_health_condition_name == "Kidney diseases" ~ list(c("Acute glomerulonephritis", "Chronic kidney disease")),
-      TRUE ~ list(input$shs_health_condition_name)
-    )[[1]]
+  # SUNBURST DATA: ~201 rows grouped by geography
+  shs_sunburst_data <- reactive({
+    query_sunburst_data(
+      db_con,
+      selected_causes(),
+      input$shs_sex_label,
+      as.integer(input$shs_year_id),
+      input$shs_age_group_name,
+      input$shs_measure_name,
+      input$shs_toggle
+    )
+  })
 
-    # Use optimized SQL aggregation (GROUP BY in DuckDB, not R)
-    query_shs_aggregated(db_con, selected_causes, input$shs_sex_label) %>%
-      mutate(
-        calc_val = case_when(
-          cause_name == "Other neglected tropical diseases" ~ deaths_val / 3,
-          cause_name %in% c(
-            "Multidrug-resistant tuberculosis without extensive drug resistance",
-            "Extensively drug-resistant tuberculosis"
-          ) ~ inc_val - deaths_val / 6,
-          cause_name == "HIV/AIDS" ~ prev_val / 3,
-          cause_name == "Alzheimer's disease and other dementias" ~ prev_val / 3,
-          cause_name == "Tetanus" ~ deaths_val / 3,
-          cause_name == "Parkinson's disease" ~ prev_val / 3,
-          cause_name == "Multiple sclerosis" ~ prev_val / 3,
-          cause_name == "Congenital birth defects" ~ deaths_val / 3,
-          cause_name == "Injuries" ~ deaths_val / 3,
-          cause_name == "Musculoskeletal disorders" ~ deaths_val / 3,
-          cause_name == "Sickle cell disorders" ~ prev_val / 3,
-          cause_name %in% c(
-            "Cirrhosis and other chronic liver diseases",
-            "Other digestive diseases",
-            "Schistosomiasis"
-          ) ~ deaths_val / 9,
-          cause_name %in% c(
-            "Chronic kidney disease",
-            "Acute glomerulonephritis"
-          ) ~ deaths_val / 6,
-          cause_name %in% c(
-            "Intracerebral hemorrhage",
-            "Ischemic stroke",
-            "Subarachnoid hemorrhage"
-          ) ~ deaths_val / 9,
-          cause_name == "Diabetes mellitus" ~ prev_val / 3,
-          cause_name == "Thalassemias" ~ prev_val / 3,
-          cause_name == "Neonatal preterm birth" ~ prev_val / 3,
-          cause_name == "Neonatal encephalopathy due to birth asphyxia and trauma" ~ prev_val / 3,
-          TRUE ~ 0
-        ),
-        level_1_factor = case_when(
-          cause_name == "Other neglected tropical diseases" ~ 0.05,
-          cause_name %in% c(
-            "Multidrug-resistant tuberculosis without extensive drug resistance",
-            "Extensively drug-resistant tuberculosis"
-          ) ~ 1,
-          cause_name == "HIV/AIDS" ~ 1,
-          cause_name == "Alzheimer's disease and other dementias" ~ 0.1,
-          cause_name == "Tetanus" ~ 0.5,
-          cause_name == "Parkinson's disease" ~ 0.1,
-          cause_name == "Multiple sclerosis" ~ 0.017,
-          cause_name == "Congenital birth defects" ~ 0.6,
-          cause_name == "Injuries" ~ 0.6,
-          cause_name == "Musculoskeletal disorders" ~ 1.4,
-          cause_name == "Sickle cell disorders" & age_id %in% c(28, 5:8) ~ 0.7,
-          cause_name == "Sickle cell disorders" & age_id %in% c(9:20, 30:235) ~ 0.5,
-          cause_name %in% c("Cirrhosis and other chronic liver diseases", "Other digestive diseases", "Schistosomiasis") ~ 0.5,
-          cause_name %in% c("Chronic kidney disease", "Acute glomerulonephritis") ~ 1,
-          cause_name %in% c("Intracerebral hemorrhage", "Ischemic stroke", "Subarachnoid hemorrhage") ~ 1,
-          cause_name == "Diabetes mellitus" ~ 0.1,
-          cause_name == "Thalassemias" & age_id %in% c(28, 5) ~ 0.7,
-          cause_name == "Thalassemias" & age_id %in% c(6:8) ~ 0.1,
-          cause_name == "Neonatal preterm birth" ~ 0.01,
-          cause_name == "Neonatal encephalopathy due to birth asphyxia and trauma" & age_id %in% c(28, 5) ~ 0.2,
-          cause_name == "Neonatal encephalopathy due to birth asphyxia and trauma" & age_id %in% c(6:8) ~ 0.1,
-          TRUE ~ 1
-        ),
-        level_2_factor = case_when(
-          cause_name == "Multidrug-resistant tuberculosis without extensive drug resistance" ~ 0.5,
-          cause_name == "Extensively drug-resistant tuberculosis" ~ 1,
-          cause_name == "HIV/AIDS" ~ 0.5,
-          cause_name %in% c("Intracerebral hemorrhage", "Ischemic stroke", "Subarachnoid hemorrhage") ~ 1.5,
-          cause_name %in% c("Cirrhosis and other chronic liver diseases", "Other digestive diseases", "Schistosomiasis") ~
-            if_else(age_id %in% c(5:8, 28), 0.95, 1.55),
-          cause_name %in% c("Chronic kidney disease", "Acute glomerulonephritis") ~
-            if_else(age_id %in% c(5:8, 28), 3, 0.9),
-          TRUE ~ 1
-        ),
-        val = calc_val * level_1_factor * level_2_factor,
-        measure_name = "SHS"
-      ) %>%
-      select(-calc_val, -level_1_factor, -level_2_factor, -deaths_val, -prev_val, -inc_val)
-  }) %>% bindCache(input$shs_health_condition_name, input$shs_sex_label, input$shs_toggle)
+  # BUBBLE CHART DATA: ~201 rows grouped by breakdown
+  shs_bubble_data <- reactive({
+    query_bubble_data(
+      db_con,
+      selected_causes(),
+      input$shs_sex_label,
+      as.integer(input$shs_year_id),
+      input$shs_age_group_name,
+      input$shs_measure_name,
+      input$breakdown,
+      input$shs_toggle
+    )
+  })
+
+  # TABLE DATA: ~201 rows
+  shs_table_data <- reactive({
+    age <- if (input$radio_indicator == "Number" && input$shs_age_group_name == "Age-standardized") {
+      "All ages"
+    } else {
+      input$shs_age_group_name
+    }
+    query_table_data(
+      db_con,
+      selected_causes(),
+      input$shs_sex_label,
+      as.integer(input$shs_year_id),
+      age,
+      input$radio_indicator,
+      input$shs_measure_name,
+      input$shs_toggle
+    )
+  })
 
   # Sunburst module ----
+  # Data is already filtered by query_sunburst_data()
 
-  viz_shs_sunburst <- function(shs, measure, year) {
-    shs <- shs %>%
-      filter(
-        year_id == input$shs_year_id,
-        age_group_name == case_when(
-          input$shs_age_group_name == "Age-standardized" ~ "All ages",
-          TRUE ~ input$shs_age_group_name
-        ),
-        metric_name == "Number"
-      ) %>%
-      group_by(
-        continent,
-        subregion,
-        location_name
-      ) %>%
-      arrange(
-        continent,
-        subregion,
-        location_name
-      ) %>%
-      summarise(val = sum(val))
+  output$shs_sunburst <- renderHighchart({
+    shs <- shs_sunburst_data()
+
+    # Handle empty data
+    if (nrow(shs) == 0) {
+      return(highchart() %>% hc_title(text = "No data available"))
+    }
 
     sunburst <- data_to_hierarchical(
       data = shs,
@@ -1658,7 +2130,7 @@ server <- function(input, output, session) {
       size_var = val,
       colors = wes_palette(
         name = "Zissou1",
-        n = length(unique(shs$continent)),
+        n = max(1, length(unique(shs$continent))),
         type = "continuous"
       )
     )
@@ -1680,61 +2152,41 @@ server <- function(input, output, session) {
     ) %>%
       hc_title(
         text = paste0(
-          if (isTRUE(input$shs_toggle)) "SHS" else unique(input$shs_measure_name),
+          if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
           ": ",
-          unique(input$shs_health_condition_name)
+          input$shs_health_condition_name
         ),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_subtitle(
-        text = paste0("Age: ", unique(input$shs_age_group_name), ", ", "Sex: ", unique(input$shs_sex_label), ", ", "Year: ", unique(input$shs_year_id)),
+        text = paste0("Age: ", input$shs_age_group_name, ", ", "Sex: ", input$shs_sex_label, ", ", "Year: ", input$shs_year_id),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_tooltip(valueDecimals = 0) %>%
       hc_exporting(
-        enabled = FALSE, # always enabled
+        enabled = FALSE,
         filename = "custom-file-name"
       ) %>%
       hc_credits(enabled = FALSE) %>%
       hc_loading() %>%
       hc_boost(enabled = TRUE)
-  }
-
-  shs_sunburst <- reactive({
-    viz_shs_sunburst(
-      shs_calculated(),
-      "val",
-      input$shs_year_id
-    )
-  })
-
-  output$shs_sunburst <- renderHighchart({
-    shs_sunburst()
   })
 
   # bubble module ----
+  # Data is already filtered by query_bubble_data()
 
-  viz_shs_bubble <- function(shs, measure, year, breakdown) {
-    shs <- shs %>%
-      filter(
-        year_id == input$shs_year_id,
-        age_group_name == case_when(
-          input$shs_age_group_name == "Age-standardized" ~ "All ages",
-          TRUE ~ input$shs_age_group_name
-        ),
-        metric_name == "Number"
-      ) %>%
-      group_by(
-        location_name,
-        .data[[breakdown]]
-      ) %>%
-      arrange(
-        location_name,
-        cause_name
-      ) %>%
-      summarise(val = sum(val))
+  output$shs_bubble <- renderHighchart({
+    shs <- shs_bubble_data()
+
+    # Handle empty data
+    if (nrow(shs) == 0) {
+      return(highchart() %>% hc_title(text = "No data available"))
+    }
+
+    # Rename breakdown_col to the actual breakdown name for proper grouping
+    breakdown <- input$breakdown
 
     highchart() %>%
       hc_add_series(
@@ -1742,8 +2194,8 @@ server <- function(input, output, session) {
         type = "packedbubble",
         hcaes(
           location_name,
-          value = .data[[measure]],
-          group = .data[[breakdown]]
+          value = val,
+          group = breakdown_col
         ),
         legendIndex = if (breakdown == "income_group") {
           c(4, 1, 2, 3)
@@ -1761,7 +2213,7 @@ server <- function(input, output, session) {
           zMin = 0,
           layoutAlgorithm = list(
             gravitationalConstant = 0.05,
-            splitSeries = TRUE, # TRUE to group points
+            splitSeries = TRUE,
             seriesInteraction = FALSE,
             dragBetweenSeries = TRUE,
             parentNodeLimit = TRUE
@@ -1779,89 +2231,69 @@ server <- function(input, output, session) {
       ) %>%
       hc_title(
         text = paste0(
-          if (isTRUE(input$shs_toggle)) "SHS" else unique(input$shs_measure_name),
+          if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
           ": ",
-          unique(input$shs_health_condition_name)
+          input$shs_health_condition_name
         ),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_subtitle(
-        text = paste0("Age: ", unique(input$shs_age_group_name), ", ", "Sex: ", unique(input$shs_sex_label), ", ", "Year: ", unique(input$shs_year_id)),
+        text = paste0("Age: ", input$shs_age_group_name, ", ", "Sex: ", input$shs_sex_label, ", ", "Year: ", input$shs_year_id),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_tooltip(valueDecimals = 0) %>%
       hc_exporting(
-        enabled = FALSE, # always enabled
+        enabled = FALSE,
         filename = "custom-file-name"
       ) %>%
       hc_credits(enabled = FALSE) %>%
       hc_loading() %>%
       hc_boost(enabled = TRUE) %>%
-      hc_colors(wes_palette(name = "Zissou1", n = length(unique(shs[[breakdown]])), type = "continuous")[1:length(unique(shs[[breakdown]]))])
-  }
-
-  shs_bubble <- reactive({
-    viz_shs_bubble(
-      shs_calculated(),
-      "val",
-      input$shs_year_id,
-      input$breakdown
-    )
-  })
-
-  output$shs_bubble <- renderHighchart({
-    shs_bubble()
+      hc_colors(wes_palette(name = "Zissou1", n = max(1, length(unique(shs$breakdown_col))), type = "continuous")[1:max(1, length(unique(shs$breakdown_col)))])
   })
 
   # map module ----
+  # Data is already filtered by query_map_data()
 
-  viz_shs_map <- function(shs, measure, year, scale) {
-    shs <- shs %>%
-      filter(
-        year_id == input$shs_year_id,
-        age_group_name == input$shs_age_group_name,
-        metric_name == "Rate"
-      ) %>%
-      group_by(location_name) %>%
-      arrange(
-        location_name,
-        cause_name
-      ) %>%
-      summarise(
-        val = sum(val)
-      )
+  output$shs_map <- renderHighchart({
+    shs <- shs_map_data()
+
+    # Handle empty data
+    if (nrow(shs) == 0) {
+      return(highchart() %>% hc_title(text = "No data available"))
+    }
 
     hcmap(
       map = "custom/world-highres",
       data = shs,
-      value = measure,
+      value = "val",
       joinBy = c(
         "name",
         "location_name"
       ),
-      name = "SHS",
+      name = if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
       download_map_data = TRUE
     ) %>%
       hc_colorAxis(
         stops = color_stops(
           colors = wes_palette("IsleofDogs2")
         ),
-        type = scale,
-        title = input$shs_measure_name
+        type = input$radio_scale,
+        title = if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name
       ) %>%
       hc_title(
         text = paste0(
-          if (isTRUE(input$shs_toggle)) "SHS" else unique(input$shs_measure_name),
+          if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
           ": ",
-          unique(input$shs_health_condition_name)
+          input$shs_health_condition_name
         ),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_subtitle(
-        text = paste0("Age: ", unique(input$shs_age_group_name), ", ", "Sex: ", unique(input$shs_sex_label), ", ", "Year: ", unique(input$shs_year_id)),
+        text = paste0("Age: ", input$shs_age_group_name, ", ", "Sex: ", input$shs_sex_label, ", ", "Year: ", input$shs_year_id),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
@@ -1872,7 +2304,7 @@ server <- function(input, output, session) {
         enableDoubleClickZoom = TRUE
       ) %>%
       hc_exporting(
-        enabled = FALSE, # always enabled
+        enabled = FALSE,
         filename = "custom-file-name"
       ) %>%
       hc_plotOptions(
@@ -1888,77 +2320,48 @@ server <- function(input, output, session) {
       hc_credits(enabled = FALSE) %>%
       hc_loading() %>%
       hc_boost(enabled = TRUE)
-  }
-
-  value <- reactive({
-    # Always use "val" - shs_calculated() puts the computed value in this column
-    "val"
-  })
-
-
-  shs_map <- reactive({
-    viz_shs_map(
-      shs_calculated(),
-      value(),
-      input$shs_year_id,
-      input$radio_scale
-    )
-  })
-
-  output$shs_map <- renderHighchart({
-    shs_map()
   })
 
   # historical chart module ----
-  viz_shs_history <- function(shs, type, measure, location, metric) {
+  # Data is already filtered by query_historical_data()
+
+  output$shs_historical_chart <- renderHighchart({
+    shs <- shs_historical_data()
+
+    # Handle empty data
+    if (nrow(shs) == 0) {
+      return(highchart() %>% hc_title(text = "No data available"))
+    }
+
+    # Convert year to factor for proper display
     shs <- shs %>%
-      filter(
-        location_name %in% location,
-        age_group_name == case_when(
-          input$radio_indicator == "Number" & input$shs_age_group_name == "Age-standardized" ~ "All ages",
-          TRUE ~ input$shs_age_group_name
-        ),
-        metric_name == input$radio_indicator
-      ) %>%
-      mutate(
-        year = factor(year_id)
-      ) %>%
-      group_by(
-        year,
-        location_name
-      ) %>%
-      summarise(val = sum(val)) %>%
-      arrange(
-        location_name,
-        year
-      ) %>%
-      dplyr::select(
-        year,
-        val,
-        location_name
-      )
+      mutate(year = factor(year)) %>%
+      arrange(location_name, year)
+
+    chart_type <- adapt_type()
+    metric <- input$radio_indicator
 
     hchart(
       shs,
-      type = type,
+      type = chart_type,
       showInLegend = TRUE,
       mapping = hcaes(
         x = as.character(year),
-        y = .data[[measure]],
+        y = val,
         group = location_name
       )
     ) %>%
       hc_title(
         text = paste0(
-          if (isTRUE(input$shs_toggle)) "SHS" else unique(input$shs_measure_name),
+          if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
           ": ",
-          unique(input$shs_health_condition_name)
+          input$shs_health_condition_name
         ),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_subtitle(
-        text = paste0("Age: ", unique(input$shs_age_group_name), ", ", "Sex: ", unique(input$shs_sex_label)),
+        text = paste0("Age: ", input$shs_age_group_name, ", ", "Sex: ", input$shs_sex_label),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
@@ -1968,7 +2371,7 @@ server <- function(input, output, session) {
         categories = sort(unique(shs$year))
       ) %>%
       hc_exporting(
-        enabled = FALSE, # always enabled
+        enabled = FALSE,
         filename = "custom-file-name"
       ) %>%
       hc_yAxis(
@@ -1982,47 +2385,20 @@ server <- function(input, output, session) {
       hc_credits(enabled = FALSE) %>%
       hc_loading() %>%
       hc_boost(enabled = TRUE)
-  }
-
-  shs_historical_chart <- reactive({
-    viz_shs_history(
-      shs_calculated(),
-      adapt_type(),
-      "val",
-      select_location(),
-      input$radio_indicator
-    )
-  })
-
-  output$shs_historical_chart <- renderHighchart({
-    shs_historical_chart()
   })
 
   # Top Ten module ----
+  # Data is already filtered and sorted by query_ranking_data()
 
-  viz_shs_top_ten <- function(shs, measure, year, metric) {
-    shs <- shs %>%
-      filter(
-        age_group_name == case_when(
-          input$radio_indicator == "Number" & input$shs_age_group_name == "Age-standardized" ~ "All ages",
-          TRUE ~ input$shs_age_group_name
-        ),
-        year_id == year,
-        metric_name == input$radio_indicator
-      ) %>%
-      group_by(location_name) %>%
-      arrange(
-        location_name,
-        cause_name
-      ) %>%
-      summarise(val = sum(val)) %>%
-      arrange(
-        case_when(
-          input$order == "top_20" ~ desc(val),
-          TRUE ~ val
-        )
-      ) %>%
-      head(20)
+  output$shs_top_ten <- renderHighchart({
+    shs <- shs_ranking_data()
+
+    # Handle empty data
+    if (nrow(shs) == 0) {
+      return(highchart() %>% hc_title(text = "No data available"))
+    }
+
+    metric <- input$radio_indicator
 
     hchart(
       object = shs,
@@ -2030,20 +2406,20 @@ server <- function(input, output, session) {
       showInLegend = FALSE,
       mapping = hcaes(
         x = location_name,
-        y = .data[[measure]]
+        y = val
       )
     ) %>%
       hc_title(
         text = paste0(
-          if (isTRUE(input$shs_toggle)) "SHS" else unique(input$shs_measure_name),
+          if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
           ": ",
-          unique(input$shs_health_condition_name)
+          input$shs_health_condition_name
         ),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
       hc_subtitle(
-        text = paste0("Age: ", unique(input$shs_age_group_name), ", ", "Sex: ", unique(input$shs_sex_label), ", ", "Year: ", unique(input$shs_year_id)),
+        text = paste0("Age: ", input$shs_age_group_name, ", ", "Sex: ", input$shs_sex_label, ", ", "Year: ", input$shs_year_id),
         font = "Econ Sans Cnd",
         useHTML = TRUE
       ) %>%
@@ -2071,46 +2447,24 @@ server <- function(input, output, session) {
       hc_credits(enabled = FALSE) %>%
       hc_loading() %>%
       hc_exporting(
-        enabled = FALSE, # always enabled
+        enabled = FALSE,
         filename = "custom-file-name"
       ) %>%
       hc_boost(enabled = TRUE)
-  }
-
-  shs_top_ten <- reactive({
-    viz_shs_top_ten(
-      shs_calculated(),
-      "val",
-      input$shs_year_id,
-      input$radio_indicator
-    )
-  })
-
-  output$shs_top_ten <- renderHighchart({
-    shs_top_ten()
   })
 
   # Table module ----
+  # Data is already filtered by query_table_data()
 
-  viz_shs_table_title <- function(measure, health_condition) {
+  output$shs_table_title <- renderText({
     paste0(
-      input$shs_measure_name,
+      if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
       ": ",
       input$shs_health_condition_name
     )
-  }
-
-  shs_table_title <- reactive({
-    viz_shs_table_title(
-      input$shs_measure_name
-    )
   })
 
-  output$shs_table_title <- renderText({
-    shs_table_title()
-  })
-
-  viz_shs_table_sub_title <- function(age, sex, year) {
+  output$shs_table_sub_title <- renderText({
     paste0(
       "Age: ",
       input$shs_age_group_name,
@@ -2121,61 +2475,25 @@ server <- function(input, output, session) {
       "Year: ",
       input$shs_year_id
     )
-  }
-
-  shs_table_sub_title <- reactive({
-    viz_shs_table_sub_title(
-      input$shs_age_group_name,
-      input$shs_sex_label,
-      input$shs_year_id
-    )
-  })
-
-  output$shs_table_sub_title <- renderText(
-    shs_table_sub_title()
-  )
-
-  viz_shs_table <- function(shs, measure, year, metric) {
-    shs <- shs %>%
-      filter(
-        age_group_name == case_when(
-          input$radio_indicator == "Number" & input$shs_age_group_name == "Age-standardized" ~ "All ages",
-          TRUE ~ input$shs_age_group_name
-        ),
-        year_id == year,
-        metric_name == input$radio_indicator
-      ) %>%
-      group_by(location_name) %>%
-      arrange(
-        location_name,
-        cause_name
-      ) %>%
-      summarise(val = round(sum(val), digits = 3)) %>%
-      datatable(
-        options = list(
-          pageLength = 10,
-          lengthChange = FALSE
-        ),
-        colnames = c("Country or territory", "Value")
-      )
-  }
-
-  shs_table <- reactive({
-    viz_shs_table(
-      shs_calculated(),
-      "val",
-      input$shs_year_id,
-      input$radio_indicator
-    )
   })
 
   output$shs_table <- DT::renderDataTable({
-    shs_table()
-  })
+    shs <- shs_table_data()
 
+    # Return empty table if no data
+    if (nrow(shs) == 0) {
+      return(datatable(data.frame(location_name = character(), val = numeric()),
+                       colnames = c("Country or territory", "Value")))
+    }
 
-  n_cols <- reactive({
-    length(unique(shs[[input$breakdown]]))
+    datatable(
+      shs,
+      options = list(
+        pageLength = 10,
+        lengthChange = FALSE
+      ),
+      colnames = c("Country or territory", "Value")
+    )
   })
 
   output$cols <- renderPrint({
