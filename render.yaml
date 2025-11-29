@@ -8,5 +8,16 @@ services:
     envVars:
       - key: PORT
         value: 3838
+      # PostgreSQL connection (set these in Render dashboard with actual Supabase values)
+      - key: POSTGRES_HOST
+        sync: false  # Set manually in dashboard
+      - key: POSTGRES_PORT
+        value: "5432"
+      - key: POSTGRES_DB
+        value: postgres
+      - key: POSTGRES_USER
+        sync: false  # Set manually in dashboard
+      - key: POSTGRES_PASSWORD
+        sync: false  # Set manually in dashboard
     plan: pro
     autoDeploy: true

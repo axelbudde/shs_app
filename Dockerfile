@@ -1,7 +1,7 @@
 FROM rocker/r2u:22.04
 
 # r2u has pre-built Ubuntu binaries - much faster and more reliable
-# Install system dependencies including fonts for hrbrthemes and wget
+# Install system dependencies including fonts for hrbrthemes and PostgreSQL client
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libcurl4-openssl-dev \
     libssl-dev \
@@ -13,17 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg-dev \
     libharfbuzz-dev \
     libfribidi-dev \
+    libpq-dev \
     fonts-roboto \
-    wget \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -fv
 
-# Install all R packages including duckdb (pre-built binaries from r2u)
+# Install all R packages (RPostgres + pool for PostgreSQL connection pooling)
 RUN install.r shiny shiny.semantic highcharter tidyr wesanderson \
-    shinycssloaders shinyWidgets shinyjs dplyr readr maps DT duckdb
+    shinycssloaders shinyWidgets shinyjs dplyr readr maps DT RPostgres pool
 
-# Verify duckdb works
-RUN R -e "library(duckdb); cat('duckdb loaded successfully\n')"
+# Verify RPostgres works
+RUN R -e "library(RPostgres); library(pool); cat('RPostgres and pool loaded successfully\n')"
 
 # Install font-related packages and hrbrthemes from GitHub
 RUN R -e "install.packages(c('systemfonts', 'extrafont', 'remotes'), repos='https://cloud.r-project.org/')"
@@ -36,15 +36,11 @@ RUN mkdir -p /srv/shiny-server/shs_app
 COPY shs_modules/mfd_app_v3.R /srv/shiny-server/shs_app/app.R
 COPY shs_modules/mapdata.rds /srv/shiny-server/shs_app/
 
-# Download database from GitHub Release (bypasses Git LFS bandwidth limits)
-RUN wget -q --show-progress -O /srv/shiny-server/shs_app/ihme_data.duckdb \
-    "https://github.com/axelbudde/shs_app/releases/download/v1.0.0-data/ihme_data.duckdb"
-
 # Set working directory
 WORKDIR /srv/shiny-server/shs_app
 
 # Expose port
 EXPOSE 3838
 
-# Run app
+# Run app (database connection configured via environment variables)
 CMD ["R", "-e", "shiny::runApp('/srv/shiny-server/shs_app', host='0.0.0.0', port=3838)"]
