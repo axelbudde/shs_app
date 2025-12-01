@@ -1684,8 +1684,32 @@ tags$h1(
   )
 )
 
+# Session counter for capacity limiting
+session_count <- reactiveVal(0)
+max_sessions <- 80  # Adjust based on testing
+
 # Define server logic required to draw a histogram
 server <- function(input, output, session) {
+  # Track session count and show message if at capacity
+  isolate(session_count(session_count() + 1))
+
+  if (isolate(session_count()) > max_sessions) {
+    showModal(modalDialog(
+      title = "Server at Capacity",
+      "The server is currently experiencing high traffic. Please try again in a few minutes.",
+      footer = modalButton("OK"),
+      easyClose = TRUE
+    ))
+    session$close()
+    return()
+  }
+
+  # Decrement counter when session ends
+
+  session$onSessionEnded(function() {
+    isolate(session_count(session_count() - 1))
+  })
+
   # Map
   click_js <- JS("function(event) {Shiny.setInputValue('mapclick',event.point.name);}")
 
