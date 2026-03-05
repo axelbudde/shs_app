@@ -2312,17 +2312,14 @@ server <- function(input, output, session) {
       return(highchart() %>% hc_title(text = "No data available"))
     }
 
-    hcmap(
-      map = map_geojson,
-      data = shs,
-      value = "val",
-      joinBy = c(
-        "name",
-        "location_name"
-      ),
-      name = if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
-      download_map_data = FALSE
-    ) %>%
+    highchart(type = "map") %>%
+      hc_add_series(
+        mapData = map_geojson,
+        data = list_parse(shs[, c("location_name", "val")]),
+        type = "map",
+        joinBy = c("name", "location_name"),
+        name = if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name
+      ) %>%
       hc_colorAxis(
         stops = color_stops(
           colors = wes_palette("IsleofDogs2")
