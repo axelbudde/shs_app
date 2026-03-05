@@ -2315,7 +2315,7 @@ server <- function(input, output, session) {
     highchart(type = "map") %>%
       hc_add_series(
         mapData = map_geojson,
-        data = list_parse(shs[, c("location_name", "val")]),
+        data = list_parse(dplyr::rename(shs[, c("location_name", "val")], value = val)),
         type = "map",
         joinBy = c("name", "location_name"),
         name = if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name
