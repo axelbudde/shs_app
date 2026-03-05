@@ -779,13 +779,16 @@ health_conditions_shs <- c(
 
 metrics <- as.list(dbGetQuery(db_con, "SELECT DISTINCT metric_name FROM ihme_data ORDER BY metric_name")$metric_name)
 
-# Use cached map data for coords (geographic data is in DuckDB via ihme_data_geo view)
-if (file.exists("mapdata.rds")) {
-  mapdata <- read_rds("mapdata.rds")
+# Use pre-bundled map GeoJSON (Highcharts CDN deprecated the old .js endpoint)
+if (file.exists("map_geojson.rds")) {
+  map_geojson <- read_rds("map_geojson.rds")
 } else {
-  mapdata <- get_data_from_map(download_map_data("custom/world-highres"))
-  saveRDS(mapdata, "mapdata.rds")
+  map_geojson <- jsonlite::fromJSON(
+    "https://cdn.jsdelivr.net/npm/@highcharts/map-collection@1.1.3/custom/world-highres.geo.json",
+    simplifyVector = FALSE
+  )
 }
+mapdata <- get_data_from_map(map_geojson)
 
 # Note: ihme_data_population.R join with mapdata is now done in DuckDB
 # The ihme_data_geo view already has continent, subregion, region_wb columns
@@ -2310,7 +2313,7 @@ server <- function(input, output, session) {
     }
 
     hcmap(
-      map = "custom/world-highres",
+      map = map_geojson,
       data = shs,
       value = "val",
       joinBy = c(
@@ -2318,7 +2321,7 @@ server <- function(input, output, session) {
         "location_name"
       ),
       name = if (isTRUE(input$shs_toggle)) "SHS" else input$shs_measure_name,
-      download_map_data = TRUE
+      download_map_data = FALSE
     ) %>%
       hc_colorAxis(
         stops = color_stops(
