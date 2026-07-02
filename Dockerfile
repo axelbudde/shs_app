@@ -13,17 +13,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg-dev \
     libharfbuzz-dev \
     libfribidi-dev \
-    libpq-dev \
     fonts-roboto \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -fv
 
-# Install all R packages (RPostgres + pool for PostgreSQL connection pooling)
+# Install all R packages (duckdb replaces RPostgres/pool)
 RUN install.r shiny shiny.semantic highcharter tidyr wesanderson \
-    shinycssloaders shinyWidgets shinyjs dplyr readr maps DT RPostgres pool
+    shinycssloaders shinyWidgets shinyjs dplyr readr maps DT duckdb
 
-# Verify RPostgres works
-RUN R -e "library(RPostgres); library(pool); cat('RPostgres and pool loaded successfully\n')"
+# Verify duckdb works
+RUN R -e "library(duckdb); cat('duckdb loaded successfully\n')"
 
 # Install font-related packages and hrbrthemes from GitHub
 RUN R -e "install.packages(c('systemfonts', 'extrafont', 'remotes'), repos='https://cloud.r-project.org/')"
@@ -32,10 +31,11 @@ RUN R -e "remotes::install_github('hrbrmstr/hrbrthemes')"
 # Create app directory
 RUN mkdir -p /srv/shiny-server/shs_app
 
-# Copy app files (mfd_app_v3.R from shs_modules - with responsive layout and updated title)
+# Copy app files
 COPY shs_modules/mfd_app_v3.R /srv/shiny-server/shs_app/app.R
 COPY shs_modules/mapdata.rds /srv/shiny-server/shs_app/
 COPY shs_modules/map_geojson.rds /srv/shiny-server/shs_app/
+COPY ihme_data.duckdb /srv/shiny-server/shs_app/
 
 # Set working directory
 WORKDIR /srv/shiny-server/shs_app
@@ -43,5 +43,5 @@ WORKDIR /srv/shiny-server/shs_app
 # Expose port
 EXPOSE 3838
 
-# Run app (database connection configured via environment variables)
+# Run app
 CMD ["R", "-e", "shiny::runApp('/srv/shiny-server/shs_app', host='0.0.0.0', port=3838)"]

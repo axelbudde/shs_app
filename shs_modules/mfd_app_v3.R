@@ -11,8 +11,7 @@ library(shinyWidgets)
 library(shinyjs)
 library(maps)
 library(DT)
-library(RPostgres)
-library(pool)
+library(duckdb)
 
 myGridTemplate <- grid_template(
   default = list(
@@ -57,26 +56,10 @@ hierarchical_grid <- grid_template(
 
 # display_grid(myGridTemplate)
 
-# Connect to PostgreSQL database with connection pooling
-# Uses environment variables for configuration (set in Render/Docker)
-db_pool <- dbPool(
-  drv = Postgres(),
-  host = Sys.getenv("POSTGRES_HOST", "localhost"),
-  port = as.integer(Sys.getenv("POSTGRES_PORT", "5432")),
-  dbname = Sys.getenv("POSTGRES_DB", "postgres"),
-  user = Sys.getenv("POSTGRES_USER", "postgres"),
-  password = Sys.getenv("POSTGRES_PASSWORD", ""),
-  minSize = 1,
-  maxSize = 5,
-  idleTimeout = 60000  # Close idle connections after 60 seconds
-)
+db_con <- dbConnect(duckdb(), "ihme_data.duckdb", read_only = TRUE)
 
-# Alias for backward compatibility with existing code
-db_con <- db_pool
-
-# Clean up pool on app shutdown
 onStop(function() {
-  poolClose(db_pool)
+  dbDisconnect(db_con, shutdown = TRUE)
 })
 
 # Helper function to query the database
